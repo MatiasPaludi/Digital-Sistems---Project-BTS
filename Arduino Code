@@ -1,0 +1,179 @@
+#include <Servo.h> //librería manejo de los ServoMotores
+#include <SoftwareSerial.h> //librería comunicación con Módulo Bluetooth
+SoftwareSerial BT(10, 11); // RX ard, TX ard
+//Sensor infrarojo altos
+#define sensor_ir_alto 3 
+//Sensor infrarojo Fbajos (color también)
+#define sensor_ir_bajo A1
+//Pin motor y led Motor
+#define LED_M 2
+#define M 5
+  // Velocidades del motor
+#define v1 120
+#define v2 170
+#define v3 255
+//Pines Servomotores
+#define SM1 9
+Servo servo1;
+//Manejo de los Servos
+  //Ángulos
+#define angulo_bajo_blanco 0
+#define angulo_bajo_negro 90   
+#define angulo_altos 180
+  //Evitar vibraciones
+int ultimaposicion_sm1=angulo_bajo_blanco; // -->> Inicializacion
+//Sensor infrarojo
+bool estadoAnterior_ir_alto = false; // -->> Variables infra alto
+bool estadoActual_ir_alto = false;
+
+bool clasificar_bajos=true; // <<---- A priori, clasifica por color los bajos
+
+bool estadoAnterior_blanco = false;  // --->> Variables infra bajo
+bool estadoActual_blanco = false;
+bool estadoAnterior_negro = false;  // --->> Variables infra bajo
+bool estadoActual_negro = false;
+#define minimo_negro 60
+#define max_negro 80 // --->> Valor que no caiga en esto es amarillo
+#define minimo_blanco 30
+#define max_blanco 50
+unsigned long t_ultimo_infra = 0;
+unsigned long tiempoActual;
+unsigned long periodoSensor=100; // f=10Hz
+
+//Evitar que el servo se mueva despues de detectar un alto 
+unsigned long tiempo_deteccion = 0;
+
+//Contadores y tiempo 
+int bajos_blancos=0, bajos_negros=0, altos=0, i=0;
+//Variables para enviar datos cada cierto intervalo 
+unsigned long tiempoAnteriorEnvio = 0;
+const unsigned long intervaloEnvio = 2500; //Periodo de envío de datos
+
+void setup() {
+  //Sensor infrarojo
+  pinMode(sensor_ir_alto,INPUT);
+  pinMode(sensor_ir_bajo,INPUT);
+  //Motor y Led de aviso
+  pinMode(LED_M, OUTPUT);
+  digitalWrite(LED_M, LOW);
+  pinMode(M, OUTPUT);
+  digitalWrite(M, LOW);
+  //Servomotores
+  servo1.attach(SM1,600,2300);
+  servo1.write(angulo_bajo_blanco);
+  //Velocidad comunicación serial con el módulo bluetooth
+  BT.begin(9600);
+  Serial.begin(9600); // con la pc (pruebas de control)
+}
+
+void loop() {
+  //Manejo Bluetooth
+  if(BT.available()){
+    
+    char comando = BT.read();
+    //Serial.write(comando);
+    switch(comando){   // --->> Posible modificación con PWM de acuerdo al botón (3 botones en la App [velocidad baja-media-alta])
+      case '0':
+        digitalWrite(LED_M, LOW); 
+        analogWrite(M, 0);
+        break;
+      case '1':
+        digitalWrite(LED_M, HIGH);
+        analogWrite(M, v1);
+        break;
+      case '2':
+        digitalWrite(LED_M, HIGH);
+        analogWrite(M, v2); 
+        break;
+      case '3':
+        digitalWrite(LED_M, HIGH);
+        analogWrite(M, v3);
+        break;
+    }
+  }
+  tiempoActual = millis(); // actualizar tiempo actual global
+
+  if (tiempoActual - t_ultimo_infra >= periodoSensor) { // --> Solo actua en caso de que haya disponible una nueva lectura 
+    actuadores(); 
+  }
+  grafico(); //Siempre gráfica
+}
+
+bool flanco_analogico(int Max, int Min, bool &EstadoAnterior, bool &EstadoActual){
+  int lectura = analogRead(sensor_ir_bajo);
+  bool detecta = (lectura <= Max && lectura >= Min);
+
+  EstadoAnterior = EstadoActual;   // Guardamos el estado anterior
+  EstadoActual = detecta;          // Actualizamos el estado actual
+
+  t_ultimo_infra = millis(); // -->> Actualizar tiempo de ultima deteccion
+
+  return (!EstadoAnterior && EstadoActual); // Detectamos el flanco ascendente
+}
+
+bool flanco_digital(bool &EstadoAnterior, bool &EstadoActual) {
+  bool EstadoLeido = (digitalRead(sensor_ir_alto) == LOW); // LOW = detección
+  EstadoAnterior = EstadoActual;
+  EstadoActual = EstadoLeido;
+  t_ultimo_infra = millis(); // -->> Actualizar tiempo de ultima deteccion
+  return (!EstadoAnterior && EstadoActual);
+}
+
+void actuadores(){
+  if(flanco_digital(estadoAnterior_ir_alto, estadoActual_ir_alto)){ // Detecta un objeto alto
+    altos++;
+    clasificar_bajos=false; 
+    tiempo_deteccion = millis();
+    if(ultimaposicion_sm1 != angulo_altos){
+      servo1.write(angulo_altos);
+      ultimaposicion_sm1 = angulo_altos;
+    }
+  }
+  if (millis() - tiempo_deteccion >= 5000) {
+    clasificar_bajos = true;
+  }
+  if(clasificar_bajos){ // -->> Habilita/Deshabilita la clasificación de bajos
+    if(flanco_analogico(max_blanco, minimo_blanco, estadoAnterior_blanco, estadoActual_blanco)){ // refleja blanco
+    bajos_blancos++;
+      if (ultimaposicion_sm1 != angulo_bajo_blanco) {
+        servo1.write(angulo_bajo_blanco);
+        ultimaposicion_sm1 = angulo_bajo_blanco;
+      }
+    }
+    if(flanco_analogico(max_negro, minimo_negro, estadoAnterior_negro, estadoActual_negro)){ // refleja negro
+      bajos_negros++;
+      if (ultimaposicion_sm1 != angulo_bajo_negro) {
+        servo1.write(angulo_bajo_negro);
+        ultimaposicion_sm1 = angulo_bajo_negro;
+      }
+    }
+  }
+}
+
+
+void grafico(){
+  //Función para enviar datos a la App cada cierto tiempo 
+  unsigned long tiempoActual = millis();
+  if (tiempoActual - tiempoAnteriorEnvio >= intervaloEnvio) {
+    tiempoAnteriorEnvio = tiempoActual;
+    //Desconexión de los servos temporalmente --> para evitar vibraciones (BT interfiere con envío al servo, por ende vibra)
+    servo1.detach();
+    int bajos=bajos_blancos+bajos_negros;
+    BT.print(i);
+    BT.print(",");
+    BT.print(bajos_blancos);
+    BT.print(",");
+    BT.print(bajos_negros);
+    BT.print(",");
+    BT.print(bajos);
+    BT.print(",");
+    BT.print(altos);
+    BT.print("\n");
+    i++;
+
+    // Volver a conectar servos (al pin original)
+    servo1.attach(SM1,600,2300);
+    //servo1.write(ultimaposicion_sm1);
+    
+  }
+}
